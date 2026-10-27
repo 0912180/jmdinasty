@@ -2,6 +2,8 @@ import { fixyPost } from '../lib/fixy.js';
 import { cargarLocalidades } from '../lib/cp.js';
 import { obtenerOrdenParaFixy } from '../lib/shopify.js';
 import { enviarOrdenAFixy } from '../lib/procesar.js';
+import { armarGuia } from '../lib/fixy.js';
+import { resolverCp } from '../lib/cp.js';
 
 // Abrir en el navegador:
 //   /api/admin?clave=TU_CLAVE&accion=test                   -> prueba conexión con Fixy
@@ -9,6 +11,7 @@ import { enviarOrdenAFixy } from '../lib/procesar.js';
 //   /api/admin?clave=TU_CLAVE&accion=registrar              -> registra el webhook de estados en Fixy
 //   /api/admin?clave=TU_CLAVE&accion=localidades&buscar=katuete  -> busca CPs en la lista de Fixy
 //   /api/admin?clave=TU_CLAVE&accion=reenviar&pedido=1033   -> reenvía a Fixy un pedido que falló
+//   /api/admin?clave=TU_CLAVE&accion=ver&pedido=1043        -> muestra el JSON que se manda a Fixy (sin enviarlo)
 export async function GET(request) {
   const url = new URL(request.url);
   if (!process.env.CLAVE_ADMIN || url.searchParams.get('clave') !== process.env.CLAVE_ADMIN) {
@@ -41,6 +44,11 @@ export async function GET(request) {
         total_en_fixy: lista.length,
         encontrados: buscar ? lista.filter((x) => x.localidad.includes(buscar)).slice(0, 30) : lista.slice(0, 10),
       };
+    } else if (accion === 'ver') {
+      const orden = await obtenerOrdenParaFixy(url.searchParams.get('pedido'));
+      if (!orden) return Response.json({ ok: false, error: 'Pedido no encontrado' }, { status: 404 });
+      const cp = orden.shipping_address ? await resolverCp(orden.shipping_address) : null;
+      resultado = { api_token: '(oculto)', ...armarGuia(orden, cp) };
     } else if (accion === 'reenviar') {
       const pedido = url.searchParams.get('pedido');
       const orden = await obtenerOrdenParaFixy(pedido);
@@ -50,7 +58,7 @@ export async function GET(request) {
       }
       resultado = await enviarOrdenAFixy(orden);
     } else {
-      return new Response('Acciones: test, servicios, registrar, localidades, reenviar', { status: 400 });
+      return new Response('Acciones: test, servicios, registrar, localidades, ver, reenviar', { status: 400 });
     }
 
     return Response.json({ ok: !resultado?.error, resultado });
