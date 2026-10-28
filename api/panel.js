@@ -101,7 +101,7 @@ function pagina({ clave, mes, dia, r, porDia, delDia }) {
   }
 
   const filas = delDia.map((p) => `<tr><td>${esc(p.nombre)}</td><td>${esc(p.cliente)}</td><td>${esc(p.ciudad)}</td>
-    <td><span class="chip ${p.grupo}">${ETIQUETAS[p.grupo]}</span></td><td class="der">${gs(p.monto)}</td></tr>`).join('');
+    <td><span class="chip ${p.grupo}">${ETIQUETAS[p.grupo]}</span>${['no_entregado', 'devuelto', 'en_reparto'].includes(p.grupo) ? `<div class="motivo">${esc(p.estado)}</div>` : ''}</td><td class="der">${gs(p.monto)}</td></tr>`).join('');
 
   return `<!doctype html><html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Panel Fixy · Cobranzas</title>
@@ -122,6 +122,7 @@ function pagina({ clave, mes, dia, r, porDia, delDia }) {
 .tabla{overflow-x:auto;background:var(--card);border:1px solid var(--borde);border-radius:12px;margin-top:18px}
 table{width:100%;border-collapse:collapse;font-size:14px}th,td{padding:9px 10px;border-bottom:1px solid var(--borde);text-align:left;white-space:nowrap}th{color:var(--sub);font-size:12px;font-weight:600}.der{text-align:right}
 .chip{font-size:12px;padding:2px 8px;border-radius:99px;border:1px solid currentColor}.cobrado{color:var(--ok)}.en_reparto{color:var(--info)}.no_entregado{color:var(--warn)}.devuelto{color:var(--mal)}.pendiente{color:var(--sub)}
+.motivo{font-size:12px;color:var(--sub);margin-top:3px;text-transform:capitalize}
 .nota{color:var(--sub);font-size:12px;margin-top:14px}
 @media (max-width:600px){.cel{min-height:62px}.plata{font-size:11px}.mini{display:none}}
 </style></head><body><div class="wrap">
