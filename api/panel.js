@@ -33,7 +33,8 @@ async function traerPedidos(desde, hasta) {
         nodes { name createdAt cancelledAt tags
           totalPriceSet { shopMoney { amount } }
           shippingAddress { name city }
-          lineItems(first: 20) { nodes { quantity requiresShipping } } } } }`,
+          lineItems(first: 20) { nodes { quantity requiresShipping } }
+          transactions(first: 5) { kind status processedAt } } } }`,
       { q: `created_at:>=${sumarDias(desde, -1)} created_at:<=${sumarDias(hasta, 1)}`, c: cursor }
     );
     pedidos.push(...d.orders.nodes);
@@ -60,11 +61,19 @@ function clasificar(o, tasa) {
   const unidades = Math.max(1, (o.lineItems?.nodes || []).filter((l) => l.requiresShipping).reduce((s, l) => s + l.quantity, 0));
   const costoUSD = unidades * COSTOS.producto + Math.ceil(unidades / COSTOS.unidadesPorPack) * COSTOS.pack + COSTOS.envio + ventaUSD * (COSTOS.binancePct / 100);
 
+  const pago = (o.transactions || []).find((t) => t.status === 'SUCCESS' && ['SALE', 'CAPTURE'].includes(t.kind));
   return {
+    diaCobro: grupo === 'cobrado' ? diaPY(pago?.processedAt || o.createdAt) : null,
     nombre: o.name, cliente: o.shippingAddress?.name || '', ciudad: o.shippingAddress?.city || '',
     dia: diaPY(o.createdAt), ventaUSD, contribUSD: ventaUSD - costoUSD, unidades,
     grupo, salio: grupo !== 'pendiente', estado: estado.replace(/-/g, ' ') || 'sin estado',
   };
+}
+
+function caja(todos, desde, hasta) {
+  const c = { cobros: 0, cobradoUSD: 0, netoUSD: 0 };
+  for (const p of todos) if (p.diaCobro && p.diaCobro >= desde && p.diaCobro <= hasta) { c.cobros++; c.cobradoUSD += p.ventaUSD; c.netoUSD += p.contribUSD; }
+  return c;
 }
 
 function calcular(pedidos, meta) {
@@ -127,7 +136,7 @@ function pagina(ctx) {
 
   const filasDias = serie.map((d) => `<tr><td>${d.dia.slice(8)}/${d.dia.slice(5, 7)}</td><td>${d.pedidos}</td><td>${din(d.ventaUSD)}</td>
     <td>${din(d.gastoUSD)}</td><td>${din(d.cpaReal)}</td><td>${d.salieron}</td><td>${d.cobrados}</td><td>${pct(d.efectividadReal)}</td>
-    <td class="${signo(d.profitReal)}">${din(d.profitReal)}</td></tr>`).join('');
+    <td class="${signo(d.profitReal)}">${din(d.profitReal)}</td><td>${din(d.caja.cobradoUSD)}</td></tr>`).join('');
 
   const ETQ = { cobrado: 'Cobrado', en_reparto: 'En reparto', no_entregado: 'No entregado', devuelto: 'Devuelto', pendiente: 'Pendiente' };
   const filasPedidos = pedidosLista.map((p) => `<tr><td>${esc(p.nombre)}</td><td>${esc(p.cliente)}</td><td>${esc(p.ciudad)}</td>
@@ -136,7 +145,7 @@ function pagina(ctx) {
 
   return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>UltraLabs · Panel</title><link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
-<meta name="apple-mobile-web-app-capable" content="yes"><meta name="theme-color" content="#0b0b0c">
+${hasta >= diaPY() ? '<meta http-equiv="refresh" content="300">' : ''}<meta name="apple-mobile-web-app-capable" content="yes"><meta name="theme-color" content="#0b0b0c">
 <style>
 :root{--bg:#0b0b0c;--panel:#141416;--card:#18181b;--borde:#26262b;--txt:#f4f4f5;--sub:#9a9aa3;--oro:#e0b43c;--oro2:#b8860b;--verde:#3ecf8e;--rojo:#f87171;--azul:#60a5fa;--amar:#fbbf24;color-scheme:dark}
 *{box-sizing:border-box}body{margin:0;background:radial-gradient(1200px 500px at 70% -10%,#2a2112 0,transparent 60%),var(--bg);color:var(--txt);font:14px/1.45 Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
@@ -169,7 +178,7 @@ tr:last-child td{border-bottom:0}.der{text-align:right}
 .mon{margin-left:0}.titulo{display:none}}
 </style></head><body>
 <div class="top"><div class="topin"><img class="logo" src="${LOGO}" alt="UltraLabs"><span class="titulo">Panel de rendimiento</span><span class="esp"></span>
-<span class="tasa">USD 1 = Gs. ${Math.round(tasa).toLocaleString('es-PY')} · ${esc(fuenteTasa)}</span></div></div>
+<span class="tasa">${hasta >= diaPY() ? `Actualizado ${new Intl.DateTimeFormat('es-PY', { timeZone: ZONA, hour: '2-digit', minute: '2-digit' }).format(new Date())} · ` : ''}USD 1 = Gs. ${Math.round(tasa).toLocaleString('es-PY')} · ${esc(fuenteTasa)}</span></div></div>
 <div class="wrap">
 <div class="filtros">
   ${rapidos.map(([t, d, h]) => `<a class="pill${d === desde && h === hasta ? ' on' : ''}" href="${q(`desde=${d}&hasta=${h}`)}">${t}</a>`).join('')}
@@ -205,21 +214,22 @@ ${metaError ? `<div class="aviso">⚠️ ${esc(metaError)}. Los datos de Meta se
 
 <h2><span class="dot" style="background:var(--verde)"></span>Cobranza · Fixy</h2>
 <div class="grid">
-  ${card('Facturación cobrada', din(r.cobradoUSD), `${r.cobrados} pedidos entregados`)}
-  ${card('Facturación neta', din(r.contribCobradosUSD), 'Cobrado − producto, pack, envío y Binance')}
+  ${card('Entró en el período', din(r.caja.cobradoUSD), `${r.caja.cobros} entregas entre estas fechas, de pedidos de cualquier día`, sparkline(serie.map((d) => d.caja.cobradoUSD), '#3ecf8e'), 'hero oro')}
+  ${card('Neto de esas entregas', din(r.caja.netoUSD), 'Menos producto, pack, envío y Binance')}
+  ${card('Cobrado de estos pedidos', din(r.cobradoUSD), `${r.cobrados} de los pedidos creados en el período · neto ${din(r.contribCobradosUSD)}`)}
   ${card('En la calle', din(r.enCalleUSD), `${r.enCalle} pedidos en reparto`)}
   ${card('No entregados', r.noEntregados, `${r.devueltos} devueltos · ${r.pendientes} sin salir`)}
 </div>
 
 <h2><span class="dot" style="background:var(--sub)"></span>Por día</h2>
-<div class="tabla"><table><thead><tr><th>Día</th><th>Pedidos</th><th>Facturación</th><th>Inversión</th><th>CPA real</th><th>Salieron</th><th>Cobrados</th><th>Efectividad</th><th>Profit real</th></tr></thead>
-<tbody>${filasDias || '<tr><td colspan="9">Sin datos</td></tr>'}</tbody></table></div>
+<div class="tabla"><table><thead><tr><th>Día</th><th>Pedidos</th><th>Facturación</th><th>Inversión</th><th>CPA real</th><th>Salieron</th><th>Cobrados</th><th>Efectividad</th><th>Profit real</th><th>Entró ese día</th></tr></thead>
+<tbody>${filasDias || '<tr><td colspan="10">Sin datos</td></tr>'}</tbody></table></div>
 
 ${desde === hasta ? `<h2><span class="dot" style="background:var(--sub)"></span>Pedidos del día</h2>
 <div class="tabla"><table><thead><tr><th>Pedido</th><th>Cliente</th><th>Ciudad</th><th>Estado</th><th>Unid.</th><th class="der">Monto</th></tr></thead>
 <tbody>${filasPedidos || '<tr><td colspan="6">Sin pedidos</td></tr>'}</tbody></table></div>` : ''}
 
-<p class="nota">Los pedidos se cuentan por el día en que se crearon, igual que el gasto de Meta, así cada día compara lo invertido con lo que generó. Profit supuesto = margen de todos los pedidos × ${COSTOS.efectividadSupuesta}% − inversión. Profit real = margen de los pedidos ya cobrados − inversión: en los días recientes sube a medida que Fixy entrega. Costos por pedido: producto $${COSTOS.producto} por frasco, pack $${COSTOS.pack} cada ${COSTOS.unidadesPorPack} frascos, envío $${COSTOS.envio}, Binance ${COSTOS.binancePct}% de la venta. Los no entregados y devueltos no suman costo. Conversión con la cotización actual.</p>
+<p class="nota">Los pedidos se cuentan por el día en que se crearon, igual que el gasto de Meta, así cada día compara lo invertido con lo que generó. Profit supuesto = margen de todos los pedidos × ${COSTOS.efectividadSupuesta}% − inversión. Profit real = margen de los pedidos ya cobrados − inversión: en los días recientes sube a medida que Fixy entrega. Costos por pedido: producto $${COSTOS.producto} por frasco, pack $${COSTOS.pack} cada ${COSTOS.unidadesPorPack} frascos, envío $${COSTOS.envio}, Binance ${COSTOS.binancePct}% de la venta. Los no entregados y devueltos no suman costo. "Entró en el período" cuenta la plata de las entregas hechas entre esas fechas, sin importar cuándo se creó el pedido. Conversión con la cotización actual.</p>
 </div></body></html>`;
 }
 
@@ -235,8 +245,9 @@ export async function GET(request) {
   const moneda = url.searchParams.get('moneda') === 'USD' ? 'USD' : 'PYG';
 
   try {
-    const [{ valor: tasa, fuente: fuenteTasa }, crudos, meta] = await Promise.all([cotizacionUSD(), traerPedidos(desde, hasta), traerMeta(desde, hasta)]);
-    const pedidos = crudos.map((o) => clasificar(o, tasa)).filter((p) => p && p.dia >= desde && p.dia <= hasta);
+    const [{ valor: tasa, fuente: fuenteTasa }, crudos, meta] = await Promise.all([cotizacionUSD(), traerPedidos(sumarDias(desde, -45), hasta), traerMeta(desde, hasta)]);
+    const todos = crudos.map((o) => clasificar(o, tasa)).filter(Boolean);
+    const pedidos = todos.filter((p) => p.dia >= desde && p.dia <= hasta);
     const aUSD = (v) => (meta.moneda === 'PYG' ? v / tasa : v);
 
     const dias = [];
@@ -250,8 +261,8 @@ export async function GET(request) {
       return m;
     };
 
-    const r = calcular(pedidos, metaDe(dias));
-    const serie = dias.map((f) => ({ dia: f, ...calcular(pedidos.filter((p) => p.dia === f), metaDe([f])) }));
+    const r = { ...calcular(pedidos, metaDe(dias)), caja: caja(todos, desde, hasta) };
+    const serie = dias.map((f) => ({ dia: f, ...calcular(pedidos.filter((p) => p.dia === f), metaDe([f])), caja: caja(todos, f, f) }));
     const pedidosLista = desde === hasta ? pedidos : [];
 
     return new Response(pagina({ clave, desde, hasta, moneda, tasa, fuenteTasa, r, serie, pedidosLista, metaError: meta.error, metaMoneda: meta.moneda }), {
