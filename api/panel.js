@@ -31,7 +31,7 @@ async function traerPedidos(desde, hasta) {
     const d = await shopifyGQL(
       `query($q: String!, $c: String) { orders(first: 100, after: $c, query: $q, sortKey: CREATED_AT) {
         pageInfo { hasNextPage endCursor }
-        nodes { name createdAt cancelledAt tags displayFulfillmentStatus
+        nodes { legacyResourceId name createdAt cancelledAt tags displayFulfillmentStatus
           totalPriceSet { shopMoney { amount } }
           shippingAddress { name city }
           lineItems(first: 5) { nodes { quantity requiresShipping } }
@@ -76,7 +76,7 @@ function clasificar(o, tasa) {
   const pago = (o.transactions || []).find((t) => t.status === 'SUCCESS' && ['SALE', 'CAPTURE'].includes(t.kind));
   return {
     diaCobro: grupo === 'cobrado' ? diaPY(pago?.processedAt || o.createdAt) : null,
-    nombre: o.name, cliente: o.shippingAddress?.name || '', ciudad: o.shippingAddress?.city || '',
+    id: o.legacyResourceId, nombre: o.name, cliente: o.shippingAddress?.name || '', ciudad: o.shippingAddress?.city || '',
     dia: diaPY(o.createdAt), ventaUSD, contribUSD: ventaUSD - costoUSD, unidades,
     grupo, sinSalir, salio: !['pendiente', 'sin_cobertura'].includes(grupo), motivo: motivoDe(grupo, estado, volvio), estado: estado.replace(/-/g, ' ') || 'sin estado',
   };
@@ -104,11 +104,11 @@ function motivoDe(grupo, estado, volvio) {
 }
 
 function calcular(pedidos, meta) {
-  const r = { pedidos: 0, motivos: {}, sinCobertura: 0, ventaUSD: 0, contribUSD: 0, salieron: 0, cobrados: 0, cobradoUSD: 0, contribCobradosUSD: 0,
+  const r = { pedidos: 0, motivos: {}, listas: { armado: [], deposito: [], sinGuia: [] }, sinCobertura: 0, ventaUSD: 0, contribUSD: 0, salieron: 0, cobrados: 0, cobradoUSD: 0, contribCobradosUSD: 0,
     enCalle: 0, enCalleUSD: 0, noEntregados: 0, noEntregadosUSD: 0, devueltos: 0, pendientes: 0, armado: 0, deposito: 0, sinGuia: 0, armadoUSD: 0, depositoUSD: 0, sinGuiaUSD: 0, pendientesUSD: 0,
     gastoUSD: meta.gastoUSD, comprasMeta: meta.compras, valorMeta: meta.valor };
   for (const p of pedidos) {
-    if (p.motivo) { r.motivos[p.motivo] ??= { n: 0, usd: 0 }; r.motivos[p.motivo].n++; r.motivos[p.motivo].usd += p.ventaUSD; }
+    if (p.motivo) { r.motivos[p.motivo] ??= { n: 0, usd: 0, lista: [] }; r.motivos[p.motivo].n++; r.motivos[p.motivo].usd += p.ventaUSD; r.motivos[p.motivo].lista.push(p); }
     if (p.grupo === 'sin_cobertura') { r.sinCobertura++; continue; }
     r.pedidos++;
     r.ventaUSD += p.ventaUSD; r.contribUSD += p.contribUSD;
@@ -117,7 +117,7 @@ function calcular(pedidos, meta) {
     if (p.grupo === 'en_reparto') { r.enCalle++; r.enCalleUSD += p.ventaUSD; }
     if (p.grupo === 'no_entregado') { r.noEntregados++; r.noEntregadosUSD += p.ventaUSD; }
     if (p.grupo === 'devuelto') r.devueltos++;
-    if (p.grupo === 'pendiente') { r.pendientes++; r.pendientesUSD += p.ventaUSD; r[p.sinSalir]++; r[p.sinSalir + 'USD'] += p.ventaUSD; }
+    if (p.grupo === 'pendiente') { r.pendientes++; r.pendientesUSD += p.ventaUSD; r[p.sinSalir]++; r[p.sinSalir + 'USD'] += p.ventaUSD; r.listas[p.sinSalir].push(p); }
   }
   const div = (a, b) => (b ? a / b : null);
   r.cpaMeta = div(r.gastoUSD, r.comprasMeta);
@@ -160,6 +160,10 @@ function pagina(ctx) {
     ['30 días', sumarDias(hoy, -29), hoy], ['Este mes', mesIni, hoy], ['Mes pasado', mesAntFin.slice(0, 8) + '01', mesAntFin],
   ];
   const s = (k) => serie.map((d) => d[k]);
+  const tienda = String(process.env.SHOPIFY_TIENDA || '').replace('.myshopify.com', '');
+  const linkPedido = (p) => (tienda && p.id ? `<a href="https://admin.shopify.com/store/${esc(tienda)}/orders/${esc(p.id)}" target="_blank" rel="noopener">${esc(p.nombre)}</a>` : esc(p.nombre));
+  const filasLista = (lista) => lista.map((p) => `<div class="lp"><span>${linkPedido(p)}</span><span class="lpc">${esc(p.cliente)} · ${esc(p.ciudad)}</span><span class="lpm">${din(p.ventaUSD)}</span></div>`).join('');
+  const desplegable = (lista) => (lista.length ? `<details class="det"><summary>Ver pedidos</summary>${filasLista(lista)}</details>` : '');
   const card = (titulo, valor, extra = '', spark = '', clase = '') =>
     `<div class="card ${clase}"><div class="ct">${titulo}</div><div class="cv">${valor}</div>${extra ? `<div class="cx">${extra}</div>` : ''}${spark}</div>`;
   const signo = (v) => (v === null ? '' : v >= 0 ? 'pos' : 'neg');
@@ -204,6 +208,10 @@ tr:last-child td{border-bottom:0}.der{text-align:right}
 .chip{font-size:11.5px;padding:2px 8px;border-radius:99px;border:1px solid currentColor}.cobrado{color:var(--verde)}.en_reparto{color:var(--azul)}.no_entregado{color:var(--amar)}.devuelto{color:var(--rojo)}.pendiente{color:var(--sub)}
 .motivo{font-size:11.5px;color:var(--sub);margin-top:3px;text-transform:capitalize}
 .motivos{margin-top:8px;display:flex;flex-direction:column;gap:5px}.mot{display:grid;grid-template-columns:1fr auto auto;gap:10px;font-size:12.5px;align-items:baseline}.mot span{color:var(--txt)}.mot b{color:var(--amar)}.mot em{color:var(--sub);font-style:normal;font-size:11.5px;text-align:right;min-width:72px}
+.det{margin-top:8px}.det summary{cursor:pointer;color:var(--oro);font-size:12.5px;list-style:none}.det summary::-webkit-details-marker{display:none}
+.det summary:before{content:'▸ ';}.det[open] summary:before{content:'▾ ';}.det.dm{margin-top:0}.det.dm summary{color:var(--txt)}.det.dm summary:before{display:none}.det.dm .mot{padding:2px 0}.det.dm[open] .mot span{color:var(--oro)}
+.lp{display:grid;grid-template-columns:auto 1fr auto;gap:8px;font-size:12px;padding:5px 0;border-top:1px solid var(--borde);align-items:baseline}.lp a{color:var(--txt);font-weight:600;text-decoration:none}.lp a:hover{color:var(--oro)}
+.lpc{color:var(--sub);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.lpm{color:var(--sub);text-align:right}
 .nota{color:var(--sub);font-size:12px;margin-top:18px;line-height:1.6}
 @media (max-width:640px){.grid{grid-template-columns:1fr 1fr}.card{min-height:104px;padding:12px}.cv{font-size:19px}.hero .cv{font-size:21px}.cx{font-size:11px}
 .mon{margin-left:0}.titulo{display:none}}
@@ -253,12 +261,12 @@ ${metaError ? `<div class="aviso">⚠️ ${esc(metaError)}. Los datos de Meta se
 
 <h2><span class="dot" style="background:var(--amar)"></span>Pedidos sin cobrar</h2>
 <div class="grid">
-  ${card('En armado', r.armado, `${din(r.armadoUSD)} · pendiente de armado o stock reservado`)}
-  ${card('En depósito', r.deposito, `${din(r.depositoUSD)} · listos para salir a reparto`)}
-  ${card('Sin guía en Fixy', r.sinGuia, `${din(r.sinGuiaUSD)} · nunca se cargaron en Fixy`)}
+  ${card('En armado', r.armado, `${din(r.armadoUSD)} · pendiente de armado o stock reservado${desplegable(r.listas.armado)}`)}
+  ${card('En depósito', r.deposito, `${din(r.depositoUSD)} · listos para salir a reparto${desplegable(r.listas.deposito)}`)}
+  ${card('Sin guía en Fixy', r.sinGuia, `${din(r.sinGuiaUSD)} · nunca se cargaron en Fixy${desplegable(r.listas.sinGuia)}`)}
   <div class="card"><div class="ct">No entregados</div><div class="cv">${r.noEntregados + r.devueltos + r.sinCobertura}</div>
     <div class="motivos">${Object.entries(r.motivos).sort((a, b) => b[1].n - a[1].n).map(([m, x]) =>
-      `<div class="mot"><span>${esc(m)}</span><b>${x.n}</b><em>${din(x.usd)}</em></div>`).join('') || '<div class="cx">Ninguno 🎉</div>'}</div></div>
+      `<details class="det dm"><summary><div class="mot"><span>${esc(m)}</span><b>${x.n}</b><em>${din(x.usd)}</em></div></summary>${filasLista(x.lista)}</details>`).join('') || '<div class="cx">Ninguno 🎉</div>'}</div></div>
 </div>
 
 <h2><span class="dot" style="background:var(--sub)"></span>Por día</h2>
