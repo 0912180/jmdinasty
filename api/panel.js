@@ -104,7 +104,7 @@ function motivoDe(grupo, estado, volvio) {
 }
 
 function calcular(pedidos, meta) {
-  const r = { pedidos: 0, motivos: {}, listas: { armado: [], deposito: [], sinGuia: [] }, sinCobertura: 0, ventaUSD: 0, contribUSD: 0, salieron: 0, cobrados: 0, cobradoUSD: 0, contribCobradosUSD: 0,
+  const r = { pedidos: 0, motivos: {}, listas: { armado: [], deposito: [], sinGuia: [], calle: [] }, sinCobertura: 0, ventaUSD: 0, contribUSD: 0, salieron: 0, cobrados: 0, cobradoUSD: 0, contribCobradosUSD: 0,
     enCalle: 0, enCalleUSD: 0, noEntregados: 0, noEntregadosUSD: 0, devueltos: 0, pendientes: 0, armado: 0, deposito: 0, sinGuia: 0, armadoUSD: 0, depositoUSD: 0, sinGuiaUSD: 0, pendientesUSD: 0,
     gastoUSD: meta.gastoUSD, comprasMeta: meta.compras, valorMeta: meta.valor };
   for (const p of pedidos) {
@@ -114,7 +114,7 @@ function calcular(pedidos, meta) {
     r.ventaUSD += p.ventaUSD; r.contribUSD += p.contribUSD;
     if (p.salio) r.salieron++;
     if (p.grupo === 'cobrado') { r.cobrados++; r.cobradoUSD += p.ventaUSD; r.contribCobradosUSD += p.contribUSD; }
-    if (p.grupo === 'en_reparto') { r.enCalle++; r.enCalleUSD += p.ventaUSD; }
+    if (p.grupo === 'en_reparto') { r.enCalle++; r.enCalleUSD += p.ventaUSD; r.listas.calle.push(p); }
     if (p.grupo === 'no_entregado') { r.noEntregados++; r.noEntregadosUSD += p.ventaUSD; }
     if (p.grupo === 'devuelto') r.devueltos++;
     if (p.grupo === 'pendiente') { r.pendientes++; r.pendientesUSD += p.ventaUSD; r[p.sinSalir]++; r[p.sinSalir + 'USD'] += p.ventaUSD; r.listas[p.sinSalir].push(p); }
@@ -162,8 +162,8 @@ function pagina(ctx) {
   const s = (k) => serie.map((d) => d[k]);
   const tienda = String(process.env.SHOPIFY_TIENDA || '').replace('.myshopify.com', '');
   const linkPedido = (p) => (tienda && p.id ? `<a href="https://admin.shopify.com/store/${esc(tienda)}/orders/${esc(p.id)}" target="_blank" rel="noopener">${esc(p.nombre)}</a>` : esc(p.nombre));
-  const filasLista = (lista) => lista.map((p) => `<div class="lp"><span>${linkPedido(p)}</span><span class="lpc">${esc(p.cliente)} · ${esc(p.ciudad)}</span><span class="lpm">${din(p.ventaUSD)}</span></div>`).join('');
-  const desplegable = (lista) => (lista.length ? `<details class="det"><summary>Ver pedidos</summary>${filasLista(lista)}</details>` : '');
+  const filasLista = (lista, conEstado) => lista.map((p) => `<div class="lp"><span>${linkPedido(p)}</span><span class="lpc">${esc(p.cliente)} · ${esc(p.ciudad)}${conEstado ? `<br><i>${esc(p.estado)}</i>` : ''}</span><span class="lpm">${din(p.ventaUSD)}</span></div>`).join('');
+  const desplegable = (lista, conEstado) => (lista.length ? `<details class="det"><summary>Ver pedidos</summary>${filasLista(lista, conEstado)}</details>` : '');
   const card = (titulo, valor, extra = '', spark = '', clase = '') =>
     `<div class="card ${clase}"><div class="ct">${titulo}</div><div class="cv">${valor}</div>${extra ? `<div class="cx">${extra}</div>` : ''}${spark}</div>`;
   const signo = (v) => (v === null ? '' : v >= 0 ? 'pos' : 'neg');
@@ -211,7 +211,7 @@ tr:last-child td{border-bottom:0}.der{text-align:right}
 .det{margin-top:8px}.det summary{cursor:pointer;color:var(--oro);font-size:12.5px;list-style:none}.det summary::-webkit-details-marker{display:none}
 .det summary:before{content:'▸ ';}.det[open] summary:before{content:'▾ ';}.det.dm{margin-top:0}.det.dm summary{color:var(--txt)}.det.dm summary:before{display:none}.det.dm .mot{padding:2px 0}.det.dm[open] .mot span{color:var(--oro)}
 .lp{display:grid;grid-template-columns:auto 1fr auto;gap:8px;font-size:12px;padding:5px 0;border-top:1px solid var(--borde);align-items:baseline}.lp a{color:var(--txt);font-weight:600;text-decoration:none}.lp a:hover{color:var(--oro)}
-.lpc{color:var(--sub);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.lpm{color:var(--sub);text-align:right}
+.lpc i{font-style:normal;text-transform:capitalize;color:var(--azul)}.lpc{color:var(--sub);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.lpm{color:var(--sub);text-align:right}
 .nota{color:var(--sub);font-size:12px;margin-top:18px;line-height:1.6}
 @media (max-width:640px){.grid{grid-template-columns:1fr 1fr}.card{min-height:104px;padding:12px}.cv{font-size:19px}.hero .cv{font-size:21px}.cx{font-size:11px}
 .mon{margin-left:0}.titulo{display:none}}
@@ -256,7 +256,7 @@ ${metaError ? `<div class="aviso">⚠️ ${esc(metaError)}. Los datos de Meta se
   ${card('Entró en el período', din(r.caja.cobradoUSD), `${r.caja.cobros} entregas entre estas fechas, de pedidos de cualquier día`, sparkline(serie.map((d) => d.caja.cobradoUSD), '#3ecf8e'), 'hero oro')}
   ${card('Neto de esas entregas', din(r.caja.netoUSD), 'Menos producto, pack, envío y Binance (sin descontar Meta)')}
   ${card('Cobrado de estos pedidos', din(r.cobradoUSD), `${r.cobrados} de los pedidos creados en el período · neto ${din(r.contribCobradosUSD)}`)}
-  ${card('En la calle', din(r.enCalleUSD), `${r.enCalle} pedidos en reparto`)}
+  ${card('En la calle', din(r.enCalleUSD), `${r.enCalle} pedidos en reparto ahora mismo${desplegable(r.listas.calle, true)}`)}
 </div>
 
 <h2><span class="dot" style="background:var(--amar)"></span>Pedidos sin cobrar</h2>
