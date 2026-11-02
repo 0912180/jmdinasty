@@ -31,7 +31,7 @@ async function traerPedidos(desde, hasta) {
     const d = await shopifyGQL(
       `query($q: String!, $c: String) { orders(first: 100, after: $c, query: $q, sortKey: CREATED_AT) {
         pageInfo { hasNextPage endCursor }
-        nodes { name createdAt cancelledAt tags
+        nodes { name createdAt cancelledAt tags displayFulfillmentStatus
           totalPriceSet { shopMoney { amount } }
           shippingAddress { name city }
           lineItems(first: 5) { nodes { quantity requiresShipping } }
@@ -47,15 +47,26 @@ async function traerPedidos(desde, hasta) {
 
 function clasificar(o, tasa) {
   const tags = o.tags || [];
-  if (o.cancelledAt || tags.includes('fixy-anulado') || tags.includes('fixy-sin-cobertura')) return null;
+  if (o.cancelledAt || tags.includes('fixy-anulado')) return null;
   const estadoTag = tags.find((t) => t.startsWith('fixy-estado-')) || '';
   const estado = estadoTag.replace('fixy-estado-', '');
 
   let grupo = 'pendiente';
-  if (estado === 'entregada') grupo = 'cobrado';
+  let volvio = false;
+  if (tags.includes('fixy-sin-cobertura')) grupo = 'sin_cobertura';
+  else if (estado === 'entregada') grupo = 'cobrado';
   else if (tags.includes('fixy-devuelto')) grupo = 'devuelto';
   else if (tags.includes('fixy-revisar') || estado.startsWith('reingreso')) grupo = 'no_entregado';
   else if (EN_REPARTO.some((e) => estado.startsWith(e))) grupo = 'en_reparto';
+  // Ya salió a reparto (Shopify lo tiene como enviado) pero Fixy lo volvió a poner en depósito: intento fallido
+  else if (o.displayFulfillmentStatus === 'FULFILLED') { grupo = 'no_entregado'; volvio = true; }
+
+  let sinSalir = null;
+  if (grupo === 'pendiente') {
+    if (!estado && !tags.some((t) => t.startsWith('fixy-guia-'))) sinSalir = 'sinGuia';
+    else if (/deposito|correo|repactado|listo/.test(estado)) sinSalir = 'deposito';
+    else sinSalir = 'armado';
+  }
 
   const ventaGs = Number(o.totalPriceSet.shopMoney.amount);
   const ventaUSD = ventaGs / tasa;
@@ -67,7 +78,7 @@ function clasificar(o, tasa) {
     diaCobro: grupo === 'cobrado' ? diaPY(pago?.processedAt || o.createdAt) : null,
     nombre: o.name, cliente: o.shippingAddress?.name || '', ciudad: o.shippingAddress?.city || '',
     dia: diaPY(o.createdAt), ventaUSD, contribUSD: ventaUSD - costoUSD, unidades,
-    grupo, salio: grupo !== 'pendiente', estado: estado.replace(/-/g, ' ') || 'sin estado',
+    grupo, sinSalir, salio: !['pendiente', 'sin_cobertura'].includes(grupo), motivo: motivoDe(grupo, estado, volvio), estado: estado.replace(/-/g, ' ') || 'sin estado',
   };
 }
 
@@ -77,18 +88,36 @@ function caja(todos, desde, hasta) {
   return c;
 }
 
+const MOTIVOS = {
+  'reingreso a deposito': 'Volvió al depósito', 'destinatario rechaza el envio': 'Rechazó el pedido', 'sin dinero': 'Sin dinero',
+  'visita sin contacto': 'No atendió', 'direccion no geolocalizada': 'Dirección no geolocalizada',
+  'direccion incorrecta o incompleta': 'Dirección incorrecta', 'reprogramado por el comprador': 'Reprogramado por el cliente',
+  'zona no atendida': 'Zona no atendida', 'envio devuelto': 'Devuelto',
+};
+function motivoDe(grupo, estado, volvio) {
+  if (grupo === 'sin_cobertura') return 'Sin cobertura';
+  if (grupo === 'devuelto') return 'Devuelto';
+  if (grupo !== 'no_entregado') return null;
+  if (volvio && /deposito|listo|correo/.test(estado)) return 'Volvió al depósito';
+  const e = estado.replace(/-/g, ' ');
+  return MOTIVOS[e] || (e ? e.charAt(0).toUpperCase() + e.slice(1) : 'Sin detalle');
+}
+
 function calcular(pedidos, meta) {
-  const r = { pedidos: pedidos.length, ventaUSD: 0, contribUSD: 0, salieron: 0, cobrados: 0, cobradoUSD: 0, contribCobradosUSD: 0,
-    enCalle: 0, enCalleUSD: 0, noEntregados: 0, devueltos: 0, pendientes: 0,
+  const r = { pedidos: 0, motivos: {}, sinCobertura: 0, ventaUSD: 0, contribUSD: 0, salieron: 0, cobrados: 0, cobradoUSD: 0, contribCobradosUSD: 0,
+    enCalle: 0, enCalleUSD: 0, noEntregados: 0, noEntregadosUSD: 0, devueltos: 0, pendientes: 0, armado: 0, deposito: 0, sinGuia: 0, armadoUSD: 0, depositoUSD: 0, sinGuiaUSD: 0, pendientesUSD: 0,
     gastoUSD: meta.gastoUSD, comprasMeta: meta.compras, valorMeta: meta.valor };
   for (const p of pedidos) {
+    if (p.motivo) { r.motivos[p.motivo] ??= { n: 0, usd: 0 }; r.motivos[p.motivo].n++; r.motivos[p.motivo].usd += p.ventaUSD; }
+    if (p.grupo === 'sin_cobertura') { r.sinCobertura++; continue; }
+    r.pedidos++;
     r.ventaUSD += p.ventaUSD; r.contribUSD += p.contribUSD;
     if (p.salio) r.salieron++;
     if (p.grupo === 'cobrado') { r.cobrados++; r.cobradoUSD += p.ventaUSD; r.contribCobradosUSD += p.contribUSD; }
     if (p.grupo === 'en_reparto') { r.enCalle++; r.enCalleUSD += p.ventaUSD; }
-    if (p.grupo === 'no_entregado') r.noEntregados++;
+    if (p.grupo === 'no_entregado') { r.noEntregados++; r.noEntregadosUSD += p.ventaUSD; }
     if (p.grupo === 'devuelto') r.devueltos++;
-    if (p.grupo === 'pendiente') r.pendientes++;
+    if (p.grupo === 'pendiente') { r.pendientes++; r.pendientesUSD += p.ventaUSD; r[p.sinSalir]++; r[p.sinSalir + 'USD'] += p.ventaUSD; }
   }
   const div = (a, b) => (b ? a / b : null);
   r.cpaMeta = div(r.gastoUSD, r.comprasMeta);
@@ -174,6 +203,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px 12px;
 tr:last-child td{border-bottom:0}.der{text-align:right}
 .chip{font-size:11.5px;padding:2px 8px;border-radius:99px;border:1px solid currentColor}.cobrado{color:var(--verde)}.en_reparto{color:var(--azul)}.no_entregado{color:var(--amar)}.devuelto{color:var(--rojo)}.pendiente{color:var(--sub)}
 .motivo{font-size:11.5px;color:var(--sub);margin-top:3px;text-transform:capitalize}
+.motivos{margin-top:8px;display:flex;flex-direction:column;gap:5px}.mot{display:grid;grid-template-columns:1fr auto auto;gap:10px;font-size:12.5px;align-items:baseline}.mot span{color:var(--txt)}.mot b{color:var(--amar)}.mot em{color:var(--sub);font-style:normal;font-size:11.5px;text-align:right;min-width:72px}
 .nota{color:var(--sub);font-size:12px;margin-top:18px;line-height:1.6}
 @media (max-width:640px){.grid{grid-template-columns:1fr 1fr}.card{min-height:104px;padding:12px}.cv{font-size:19px}.hero .cv{font-size:21px}.cx{font-size:11px}
 .mon{margin-left:0}.titulo{display:none}}
@@ -216,10 +246,19 @@ ${metaError ? `<div class="aviso">⚠️ ${esc(metaError)}. Los datos de Meta se
 <h2><span class="dot" style="background:var(--verde)"></span>Cobranza · Fixy</h2>
 <div class="grid">
   ${card('Entró en el período', din(r.caja.cobradoUSD), `${r.caja.cobros} entregas entre estas fechas, de pedidos de cualquier día`, sparkline(serie.map((d) => d.caja.cobradoUSD), '#3ecf8e'), 'hero oro')}
-  ${card('Neto de esas entregas', din(r.caja.netoUSD), 'Menos producto, pack, envío y Binance')}
+  ${card('Neto de esas entregas', din(r.caja.netoUSD), 'Menos producto, pack, envío y Binance (sin descontar Meta)')}
   ${card('Cobrado de estos pedidos', din(r.cobradoUSD), `${r.cobrados} de los pedidos creados en el período · neto ${din(r.contribCobradosUSD)}`)}
   ${card('En la calle', din(r.enCalleUSD), `${r.enCalle} pedidos en reparto`)}
-  ${card('No entregados', r.noEntregados, `${r.devueltos} devueltos · ${r.pendientes} sin salir`)}
+</div>
+
+<h2><span class="dot" style="background:var(--amar)"></span>Pedidos sin cobrar</h2>
+<div class="grid">
+  ${card('En armado', r.armado, `${din(r.armadoUSD)} · pendiente de armado o stock reservado`)}
+  ${card('En depósito', r.deposito, `${din(r.depositoUSD)} · listos para salir a reparto`)}
+  ${card('Sin guía en Fixy', r.sinGuia, `${din(r.sinGuiaUSD)} · nunca se cargaron en Fixy`)}
+  <div class="card"><div class="ct">No entregados</div><div class="cv">${r.noEntregados + r.devueltos + r.sinCobertura}</div>
+    <div class="motivos">${Object.entries(r.motivos).sort((a, b) => b[1].n - a[1].n).map(([m, x]) =>
+      `<div class="mot"><span>${esc(m)}</span><b>${x.n}</b><em>${din(x.usd)}</em></div>`).join('') || '<div class="cx">Ninguno 🎉</div>'}</div></div>
 </div>
 
 <h2><span class="dot" style="background:var(--sub)"></span>Por día</h2>
