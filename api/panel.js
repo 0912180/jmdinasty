@@ -34,8 +34,8 @@ async function traerPedidos(desde, hasta) {
         nodes { legacyResourceId name createdAt cancelledAt tags displayFulfillmentStatus
           totalPriceSet { shopMoney { amount } }
           shippingAddress { name city }
-          lineItems(first: 5) { nodes { quantity requiresShipping } }
-          transactions(first: 3) { kind status processedAt } } } }`,
+          lineItems(first: 3) { nodes { quantity requiresShipping } }
+          transactions(first: 2) { kind status processedAt } } } }`,
       { q: `created_at:>=${sumarDias(desde, -1)} created_at:<=${sumarDias(hasta, 1)}`, c: cursor }
     );
     pedidos.push(...d.orders.nodes);
@@ -145,7 +145,7 @@ function sparkline(valores, color) {
 }
 
 function pagina(ctx) {
-  const { clave, desde, hasta, moneda, tasa, fuenteTasa, r, serie, pedidosLista, metaError, metaMoneda } = ctx;
+  const { clave, desde, hasta, moneda, tasa, fuenteTasa, r, serie, pedidosLista, metaError, metaMoneda, tiempos = {}, totalPedidos = 0 } = ctx;
   const din = (usd) => {
     if (usd === null || !Number.isFinite(usd)) return '—';
     return moneda === 'USD'
@@ -287,6 +287,7 @@ ${desde === hasta ? `<h2><span class="dot" style="background:var(--sub)"></span>
 <tbody>${filasPedidos || '<tr><td colspan="6">Sin pedidos</td></tr>'}</tbody></table></div>` : ''}
 
 <p class="nota">Los pedidos se cuentan por el día en que se crearon, igual que el gasto de Meta, así cada día compara lo invertido con lo que generó. Profit supuesto = margen de todos los pedidos × ${COSTOS.efectividadSupuesta}% − inversión. Profit real = margen de los pedidos ya cobrados − inversión: en los días recientes sube a medida que Fixy entrega. Costos por pedido: producto $${COSTOS.producto} por frasco, pack $${COSTOS.pack} cada ${COSTOS.unidadesPorPack} frascos, envío $${COSTOS.envio}, Binance ${COSTOS.binancePct}% de la venta. Los no entregados y devueltos no suman costo. "Entró en el período" cuenta la plata de las entregas hechas entre esas fechas, sin importar cuándo se creó el pedido. Conversión con la cotización actual.</p>
+<p class="nota">Tiempos de carga: Shopify ${tiempos.shopify}s (${totalPedidos} pedidos) · Meta ${tiempos.meta}s · Cotización ${tiempos.cambio}s</p>
 </div>
 <script>
 document.addEventListener('click', function (e) {
@@ -299,10 +300,26 @@ document.addEventListener('click', function (e) {
 </script></body></html>`;
 }
 
+function pantallaCarga() {
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UltraLabs · Panel</title><meta name="theme-color" content="#0b0b0c"><style>
+body{margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;background:#0b0b0c;color:#9a9aa3;font:14px system-ui,-apple-system,sans-serif}
+img{height:26px}.sp{width:34px;height:34px;border:3px solid #26262b;border-top-color:#e0b43c;border-radius:50%;animation:g 0.8s linear infinite}@keyframes g{to{transform:rotate(360deg)}}
+</style></head><body><img src="${LOGO}" alt="UltraLabs"><div class="sp"></div><div id="m">Cargando datos…</div>
+<script>
+var u = new URL(location.href); u.searchParams.set('parcial', '1');
+fetch(u).then(function (r) { return r.text(); }).then(function (h) { document.open(); document.write(h); document.close(); })
+  .catch(function () { document.getElementById('m').textContent = 'No se pudo cargar. Recargá la página.'; });
+</script></body></html>`;
+}
+
 export async function GET(request) {
   const url = new URL(request.url);
   const clave = url.searchParams.get('clave');
   if (!process.env.CLAVE_ADMIN || clave !== process.env.CLAVE_ADMIN) return new Response('No autorizado', { status: 401 });
+  if (url.searchParams.get('parcial') !== '1') {
+    return new Response(pantallaCarga(), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'public, s-maxage=86400' } });
+  }
 
   const hoy = diaPY();
   let desde = okFecha(url.searchParams.get('desde')) ? url.searchParams.get('desde') : hoy.slice(0, 8) + '01';
@@ -311,7 +328,13 @@ export async function GET(request) {
   const moneda = url.searchParams.get('moneda') === 'USD' ? 'USD' : 'PYG';
 
   try {
-    const [{ valor: tasa, fuente: fuenteTasa }, crudos, meta] = await Promise.all([cotizacionUSD(), traerPedidos(sumarDias(desde, -Number(process.env.PANEL_DIAS_ATRAS || 25)), hasta), traerMeta(desde, hasta)]);
+    const t0 = Date.now(), tiempos = {};
+    const medir = (k, prom) => prom.finally(() => { tiempos[k] = ((Date.now() - t0) / 1000).toFixed(1); });
+    const [{ valor: tasa, fuente: fuenteTasa }, crudos, meta] = await Promise.all([
+      medir('cambio', cotizacionUSD()),
+      medir('shopify', traerPedidos(sumarDias(desde, -Number(process.env.PANEL_DIAS_ATRAS || 25)), hasta)),
+      medir('meta', traerMeta(desde, hasta)),
+    ]);
     const todos = crudos.map((o) => clasificar(o, tasa)).filter(Boolean);
     const pedidos = todos.filter((p) => p.dia >= desde && p.dia <= hasta);
     const aUSD = (v) => (meta.moneda === 'PYG' ? v / tasa : v);
@@ -331,7 +354,7 @@ export async function GET(request) {
     const serie = dias.map((f) => ({ dia: f, ...calcular(pedidos.filter((p) => p.dia === f), metaDe([f])), caja: caja(todos, f, f) }));
     const pedidosLista = desde === hasta ? pedidos : [];
 
-    return new Response(pagina({ clave, desde, hasta, moneda, tasa, fuenteTasa, r, serie, pedidosLista, metaError: meta.error, metaMoneda: meta.moneda }), {
+    return new Response(pagina({ clave, desde, hasta, moneda, tasa, fuenteTasa, r, serie, pedidosLista, metaError: meta.error, metaMoneda: meta.moneda, tiempos, totalPedidos: crudos.length }), {
       // Vercel guarda la página 2 minutos: las siguientes aperturas son instantáneas
       headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'public, s-maxage=120, stale-while-revalidate=600' },
     });
