@@ -76,7 +76,10 @@ function clasificar(o, tasa) {
   const pago = (o.transactions || []).find((t) => t.status === 'SUCCESS' && ['SALE', 'CAPTURE'].includes(t.kind));
   return {
     diaCobro: grupo === 'cobrado' ? diaPY(pago?.processedAt || o.createdAt) : null,
-    id: o.legacyResourceId, nombre: o.name, cliente: o.shippingAddress?.name || '', ciudad: o.shippingAddress?.city || '',
+    id: o.legacyResourceId,
+    guia: (tags.find((t) => t.startsWith('fixy-guia-')) || '').replace('fixy-guia-', ''),
+    carga: new Intl.DateTimeFormat('es-PY', { timeZone: ZONA, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(o.createdAt)).replace(',', ''),
+    nombre: o.name, cliente: o.shippingAddress?.name || '', ciudad: o.shippingAddress?.city || '',
     dia: diaPY(o.createdAt), ventaUSD, contribUSD: ventaUSD - costoUSD, unidades,
     grupo, sinSalir, salio: !['pendiente', 'sin_cobertura'].includes(grupo), motivo: motivoDe(grupo, estado, volvio), estado: estado.replace(/-/g, ' ') || 'sin estado',
   };
@@ -162,7 +165,11 @@ function pagina(ctx) {
   const s = (k) => serie.map((d) => d[k]);
   const tienda = String(process.env.SHOPIFY_TIENDA || '').replace('.myshopify.com', '');
   const linkPedido = (p) => (tienda && p.id ? `<a href="https://admin.shopify.com/store/${esc(tienda)}/orders/${esc(p.id)}" target="_blank" rel="noopener">${esc(p.nombre)}</a>` : esc(p.nombre));
-  const filasLista = (lista, conEstado) => lista.map((p) => `<div class="lp"><span>${linkPedido(p)}</span><span class="lpc">${esc(p.cliente)} · ${esc(p.ciudad)}${conEstado ? `<br><i>${esc(p.estado)}</i>` : ''}</span><span class="lpm">${din(p.ventaUSD)}</span></div>`).join('');
+  const textoCopiar = (lista) => lista.map((p) => `${p.guia ? `Guía ${p.guia}` : 'Sin guía'} · Pedido ${p.nombre} · Cargado ${p.carga}`).join('\n');
+  const botonCopiar = (lista) => `<button type="button" class="copiar" data-copiar="${esc(textoCopiar(lista))}">📋 Copiar guías</button>`;
+  const filasLista = (lista, conEstado) => botonCopiar(lista) + lista.map((p) => `<div class="lp"><span>${linkPedido(p)}</span>
+    <span class="lpc">${esc(p.cliente)} · ${esc(p.ciudad)}${conEstado ? ` · <i>${esc(p.estado)}</i>` : ''}<br><small>${p.guia ? `Guía <b class="g">${esc(p.guia)}</b>` : '<b class="sg">Sin guía</b>'} · cargado ${esc(p.carga)}</small></span>
+    <span class="lpm">${din(p.ventaUSD)}</span></div>`).join('');
   const desplegable = (lista, conEstado) => (lista.length ? `<details class="det"><summary>Ver pedidos</summary>${filasLista(lista, conEstado)}</details>` : '');
   const card = (titulo, valor, extra = '', spark = '', clase = '') =>
     `<div class="card ${clase}"><div class="ct">${titulo}</div><div class="cv">${valor}</div>${extra ? `<div class="cx">${extra}</div>` : ''}${spark}</div>`;
@@ -211,7 +218,9 @@ tr:last-child td{border-bottom:0}.der{text-align:right}
 .det{margin-top:8px}.det summary{cursor:pointer;color:var(--oro);font-size:12.5px;list-style:none}.det summary::-webkit-details-marker{display:none}
 .det summary:before{content:'▸ ';}.det[open] summary:before{content:'▾ ';}.det.dm{margin-top:0}.det.dm summary{color:var(--txt)}.det.dm summary:before{display:none}.det.dm .mot{padding:2px 0}.det.dm[open] .mot span{color:var(--oro)}
 .lp{display:grid;grid-template-columns:auto 1fr auto;gap:8px;font-size:12px;padding:5px 0;border-top:1px solid var(--borde);align-items:baseline}.lp a{color:var(--txt);font-weight:600;text-decoration:none}.lp a:hover{color:var(--oro)}
-.lpc i{font-style:normal;text-transform:capitalize;color:var(--azul)}.lpc{color:var(--sub);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.lpm{color:var(--sub);text-align:right}
+.copiar{margin:8px 0 4px;background:transparent;border:1px solid var(--borde);color:var(--txt);border-radius:8px;padding:5px 10px;font:inherit;font-size:12px;cursor:pointer}.copiar:hover{border-color:var(--oro);color:var(--oro)}
+.lpc small{font-size:11.5px;color:var(--sub)}.lpc .g{color:var(--txt);user-select:all}.lpc .sg{color:var(--rojo)}
+.lpc i{font-style:normal;text-transform:capitalize;color:var(--azul)}.lpc{color:var(--sub);overflow:hidden;text-overflow:ellipsis}.lpm{color:var(--sub);text-align:right}
 .nota{color:var(--sub);font-size:12px;margin-top:18px;line-height:1.6}
 @media (max-width:640px){.grid{grid-template-columns:1fr 1fr}.card{min-height:104px;padding:12px}.cv{font-size:19px}.hero .cv{font-size:21px}.cx{font-size:11px}
 .mon{margin-left:0}.titulo{display:none}}
@@ -278,7 +287,16 @@ ${desde === hasta ? `<h2><span class="dot" style="background:var(--sub)"></span>
 <tbody>${filasPedidos || '<tr><td colspan="6">Sin pedidos</td></tr>'}</tbody></table></div>` : ''}
 
 <p class="nota">Los pedidos se cuentan por el día en que se crearon, igual que el gasto de Meta, así cada día compara lo invertido con lo que generó. Profit supuesto = margen de todos los pedidos × ${COSTOS.efectividadSupuesta}% − inversión. Profit real = margen de los pedidos ya cobrados − inversión: en los días recientes sube a medida que Fixy entrega. Costos por pedido: producto $${COSTOS.producto} por frasco, pack $${COSTOS.pack} cada ${COSTOS.unidadesPorPack} frascos, envío $${COSTOS.envio}, Binance ${COSTOS.binancePct}% de la venta. Los no entregados y devueltos no suman costo. "Entró en el período" cuenta la plata de las entregas hechas entre esas fechas, sin importar cuándo se creó el pedido. Conversión con la cotización actual.</p>
-</div></body></html>`;
+</div>
+<script>
+document.addEventListener('click', function (e) {
+  var b = e.target.closest('.copiar'); if (!b) return;
+  var t = b.getAttribute('data-copiar'), ok = function () { var o = b.textContent; b.textContent = '✅ Copiado'; setTimeout(function () { b.textContent = o; }, 1500); };
+  if (navigator.clipboard) navigator.clipboard.writeText(t).then(ok, function () { fallback(); });
+  else fallback();
+  function fallback() { var a = document.createElement('textarea'); a.value = t; document.body.appendChild(a); a.select(); try { document.execCommand('copy'); ok(); } catch (x) {} a.remove(); }
+});
+</script></body></html>`;
 }
 
 export async function GET(request) {
