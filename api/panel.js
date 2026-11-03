@@ -325,6 +325,9 @@ export async function GET(request) {
   let desde = okFecha(url.searchParams.get('desde')) ? url.searchParams.get('desde') : hoy.slice(0, 8) + '01';
   let hasta = okFecha(url.searchParams.get('hasta')) ? url.searchParams.get('hasta') : hoy;
   if (desde > hasta) [desde, hasta] = [hasta, desde];
+  // No tiene sentido pedir días futuros: se corta en hoy
+  if (hasta > hoy) hasta = hoy;
+  if (desde > hoy) desde = hoy;
   const moneda = url.searchParams.get('moneda') === 'USD' ? 'USD' : 'PYG';
 
   try {
