@@ -29,7 +29,12 @@ const REVISAR = [
   'reprogramado por mal clima', 'reprogramado por el comprador', 'visita sin contacto', 'sin dinero',
   'zona no atendida', 'paquete danado o incompleto', 'envio extraviado', 'envio robado',
   'falla mecanica, averia de vehiculo', 'zona peligrosa o de muy dificil acceso',
-  'destinatario rechaza el envio', 'esperando programacion',
+  'destinatario rechaza el envio', 'esperando programacion', 'reingreso a deposito', 'reprogramado por el comprador',
+];
+// Fallas después de un intento real de entrega: disparan el aviso "no pudimos entregarte"
+const INTENTO_FALLIDO = [
+  'visita sin contacto', 'sin dinero', 'destinatario rechaza el envio', 'reingreso a deposito',
+  'direccion incorrecta o incompleta', 'reprogramado por el comprador',
 ];
 const DEVUELTO = ['envio devuelto', 'cobro de servicio y deolucion de mercaderia a la empresa', 'cobro de servicio y devolucion de mercaderia a la empresa'];
 
@@ -45,13 +50,21 @@ async function procesarEstado({ estado, codigo_estado, remito, guia }) {
   const despachado = entregada || DESPACHADO.includes(e) || DESPACHADO_EMPIEZA.some((p) => e.startsWith(p))
     || extraDespacho.includes(e) || extraDespacho.includes(normalizar(codigo));
   const revisar = REVISAR.includes(e);
+  const fallido = INTENTO_FALLIDO.includes(e);
+  const yendo = e === 'yendo a entregar';
 
   // Etiquetas: se reemplaza el estado anterior por el actual
-  const quitar = orden.tags.filter((t) => t.startsWith('fixy-estado-') || t === 'fixy-revisar');
+  // Se reemplaza el estado anterior; si la guía vuelve a moverse, deja de figurar como anulada o devuelta
+  // Las etiquetas de control de RedChat (aviso-*) se liberan cuando el pedido cambia de etapa,
+  // así un nuevo intento de entrega vuelve a avisar al cliente
+  const quitar = orden.tags.filter((t) => t.startsWith('fixy-estado-') || t === 'fixy-revisar' || t === 'fixy-intento-fallido'
+    || (t === 'fixy-anulado' && e !== 'anulado') || (t === 'fixy-devuelto' && !DEVUELTO.includes(e))
+    || (t === 'aviso-yendo' && !yendo) || (t === 'aviso-fallido' && !fallido));
   if (quitar.length) await quitarTags(orden.id, quitar);
 
   const nuevas = [`fixy-estado-${slug(estado)}`];
   if (revisar) nuevas.push('fixy-revisar');
+  if (fallido) nuevas.push('fixy-intento-fallido');
   if (DEVUELTO.includes(e)) nuevas.push('fixy-devuelto');
   if (e === 'anulado') nuevas.push('fixy-anulado');
   await agregarTags(orden.id, nuevas);
