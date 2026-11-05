@@ -12,6 +12,7 @@ import { resolverCp } from '../lib/cp.js';
 //   /api/admin?clave=TU_CLAVE&accion=localidades&buscar=katuete  -> busca CPs en la lista de Fixy
 //   /api/admin?clave=TU_CLAVE&accion=reenviar&pedido=1033   -> reenvía a Fixy un pedido que falló
 //   /api/admin?clave=TU_CLAVE&accion=ver&pedido=1043        -> muestra el JSON que se manda a Fixy (sin enviarlo)
+//   /api/admin?clave=TU_CLAVE&accion=novedades               -> prueba si la API de novedades/reclamos está habilitada
 export async function GET(request) {
   const url = new URL(request.url);
   if (!process.env.CLAVE_ADMIN || url.searchParams.get('clave') !== process.env.CLAVE_ADMIN) {
@@ -44,6 +45,11 @@ export async function GET(request) {
         total_en_fixy: lista.length,
         encontrados: buscar ? lista.filter((x) => x.localidad.includes(buscar)).slice(0, 30) : lista.slice(0, 10),
       };
+    } else if (accion === 'novedades') {
+      resultado = {
+        sectores: await fixyPost('sectores').catch((e) => `ERROR: ${e.message}`),
+        tipos_de_reclamo: await fixyPost('tipo-reclamos').catch((e) => `ERROR: ${e.message}`),
+      };
     } else if (accion === 'ver') {
       const orden = await obtenerOrdenParaFixy(url.searchParams.get('pedido'));
       if (!orden) return Response.json({ ok: false, error: 'Pedido no encontrado' }, { status: 404 });
@@ -58,7 +64,7 @@ export async function GET(request) {
       }
       resultado = await enviarOrdenAFixy(orden);
     } else {
-      return new Response('Acciones: test, servicios, registrar, localidades, ver, reenviar', { status: 400 });
+      return new Response('Acciones: test, servicios, registrar, localidades, ver, reenviar, novedades', { status: 400 });
     }
 
     return Response.json({ ok: !resultado?.error, resultado });
