@@ -63,7 +63,8 @@ function clasificar(o, tasa) {
 
   let sinSalir = null;
   if (grupo === 'pendiente') {
-    if (!estado && !tags.some((t) => t.startsWith('fixy-guia-'))) sinSalir = 'sinGuia';
+    const confirmado = tags.some((t) => t.toLowerCase() === (process.env.FIXY_ETIQUETA_CONFIRMADO || 'CONFIRMADO').toLowerCase());
+    if (!estado && !tags.some((t) => t.startsWith('fixy-guia-'))) sinSalir = process.env.FIXY_REQUIERE_CONFIRMACION === 'si' && !confirmado ? 'sinConfirmar' : 'sinGuia';
     else if (/deposito|correo|repactado|listo/.test(estado)) sinSalir = 'deposito';
     else sinSalir = 'armado';
   }
@@ -71,7 +72,13 @@ function clasificar(o, tasa) {
   const ventaGs = Number(o.totalPriceSet.shopMoney.amount);
   const ventaUSD = ventaGs / tasa;
   const unidades = Math.max(1, (o.lineItems?.nodes || []).filter((l) => l.requiresShipping).reduce((s, l) => s + l.quantity, 0));
-  const costoUSD = unidades * COSTOS.producto + Math.ceil(unidades / COSTOS.unidadesPorPack) * COSTOS.pack + COSTOS.envio + ventaUSD * (COSTOS.binancePct / 100);
+  const costos = {
+    producto: unidades * COSTOS.producto,
+    pack: Math.ceil(unidades / COSTOS.unidadesPorPack) * COSTOS.pack,
+    envio: COSTOS.envio,
+    binance: ventaUSD * (COSTOS.binancePct / 100),
+  };
+  const costoUSD = costos.producto + costos.pack + costos.envio + costos.binance;
 
   const pago = (o.transactions || []).find((t) => t.status === 'SUCCESS' && ['SALE', 'CAPTURE'].includes(t.kind));
   return {
@@ -80,14 +87,17 @@ function clasificar(o, tasa) {
     guia: (tags.find((t) => t.startsWith('fixy-guia-')) || '').replace('fixy-guia-', ''),
     carga: new Intl.DateTimeFormat('es-PY', { timeZone: ZONA, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(o.createdAt)).replace(',', ''),
     nombre: o.name, cliente: o.shippingAddress?.name || '', ciudad: o.shippingAddress?.city || '',
-    dia: diaPY(o.createdAt), ventaUSD, contribUSD: ventaUSD - costoUSD, unidades,
+    dia: diaPY(o.createdAt), ventaUSD, contribUSD: ventaUSD - costoUSD, unidades, costos,
     grupo, sinSalir, salio: !['pendiente', 'sin_cobertura'].includes(grupo), motivo: motivoDe(grupo, estado, volvio), estado: estado.replace(/-/g, ' ') || 'sin estado',
   };
 }
 
 function caja(todos, desde, hasta) {
-  const c = { cobros: 0, cobradoUSD: 0, netoUSD: 0 };
-  for (const p of todos) if (p.diaCobro && p.diaCobro >= desde && p.diaCobro <= hasta) { c.cobros++; c.cobradoUSD += p.ventaUSD; c.netoUSD += p.contribUSD; }
+  const c = { cobros: 0, cobradoUSD: 0, netoUSD: 0, unidades: 0, producto: 0, pack: 0, envio: 0, binance: 0 };
+  for (const p of todos) if (p.diaCobro && p.diaCobro >= desde && p.diaCobro <= hasta) {
+    c.cobros++; c.cobradoUSD += p.ventaUSD; c.netoUSD += p.contribUSD; c.unidades += p.unidades;
+    for (const k of ['producto', 'pack', 'envio', 'binance']) c[k] += p.costos[k];
+  }
   return c;
 }
 
@@ -107,8 +117,8 @@ function motivoDe(grupo, estado, volvio) {
 }
 
 function calcular(pedidos, meta) {
-  const r = { pedidos: 0, motivos: {}, listas: { armado: [], deposito: [], sinGuia: [], calle: [] }, sinCobertura: 0, ventaUSD: 0, contribUSD: 0, salieron: 0, cobrados: 0, cobradoUSD: 0, contribCobradosUSD: 0,
-    enCalle: 0, enCalleUSD: 0, noEntregados: 0, noEntregadosUSD: 0, devueltos: 0, pendientes: 0, armado: 0, deposito: 0, sinGuia: 0, armadoUSD: 0, depositoUSD: 0, sinGuiaUSD: 0, pendientesUSD: 0,
+  const r = { pedidos: 0, motivos: {}, listas: { armado: [], deposito: [], sinGuia: [], sinConfirmar: [], calle: [] }, sinCobertura: 0, ventaUSD: 0, contribUSD: 0, salieron: 0, cobrados: 0, cobradoUSD: 0, contribCobradosUSD: 0,
+    enCalle: 0, enCalleUSD: 0, noEntregados: 0, noEntregadosUSD: 0, devueltos: 0, pendientes: 0, armado: 0, deposito: 0, sinGuia: 0, sinConfirmar: 0, armadoUSD: 0, depositoUSD: 0, sinGuiaUSD: 0, sinConfirmarUSD: 0, pendientesUSD: 0,
     gastoUSD: meta.gastoUSD, comprasMeta: meta.compras, valorMeta: meta.valor };
   for (const p of pedidos) {
     if (p.motivo) { r.motivos[p.motivo] ??= { n: 0, usd: 0, lista: [] }; r.motivos[p.motivo].n++; r.motivos[p.motivo].usd += p.ventaUSD; r.motivos[p.motivo].lista.push(p); }
@@ -263,7 +273,13 @@ ${metaError ? `<div class="aviso">⚠️ ${esc(metaError)}. Los datos de Meta se
 <h2><span class="dot" style="background:var(--verde)"></span>Cobranza · Fixy</h2>
 <div class="grid">
   ${card('Entró en el período', din(r.caja.cobradoUSD), `${r.caja.cobros} entregas entre estas fechas, de pedidos de cualquier día`, sparkline(serie.map((d) => d.caja.cobradoUSD), '#3ecf8e'), 'hero oro')}
-  ${card('Neto de esas entregas', din(r.caja.netoUSD), 'Menos producto, pack, envío y Binance (sin descontar Meta)')}
+  <div class="card"><div class="ct">Neto de esas entregas</div><div class="cv">${din(r.caja.netoUSD)}</div><div class="cx">Sin descontar Meta</div>
+    <div class="motivos">
+      <div class="mot"><span>Producto (${r.caja.unidades} frascos)</span><b></b><em>− ${din(r.caja.producto)}</em></div>
+      <div class="mot"><span>Pack</span><b></b><em>− ${din(r.caja.pack)}</em></div>
+      <div class="mot"><span>Envío Fixy (${r.caja.cobros})</span><b></b><em>− ${din(r.caja.envio)}</em></div>
+      <div class="mot"><span>Binance ${COSTOS.binancePct}%</span><b></b><em>− ${din(r.caja.binance)}</em></div>
+    </div></div>
   ${card('Cobrado de estos pedidos', din(r.cobradoUSD), `${r.cobrados} de los pedidos creados en el período · neto ${din(r.contribCobradosUSD)}`)}
   ${card('En la calle', din(r.enCalleUSD), `${r.enCalle} pedidos en reparto ahora mismo${desplegable(r.listas.calle, true)}`)}
 </div>
@@ -272,7 +288,8 @@ ${metaError ? `<div class="aviso">⚠️ ${esc(metaError)}. Los datos de Meta se
 <div class="grid">
   ${card('En armado', r.armado, `${din(r.armadoUSD)} · pendiente de armado o stock reservado${desplegable(r.listas.armado)}`)}
   ${card('En depósito', r.deposito, `${din(r.depositoUSD)} · listos para salir a reparto${desplegable(r.listas.deposito)}`)}
-  ${card('Sin guía en Fixy', r.sinGuia, `${din(r.sinGuiaUSD)} · nunca se cargaron en Fixy${desplegable(r.listas.sinGuia)}`)}
+  ${process.env.FIXY_REQUIERE_CONFIRMACION === 'si' ? card('Esperando confirmación', r.sinConfirmar, `${din(r.sinConfirmarUSD)} · el cliente todavía no confirmó por WhatsApp${desplegable(r.listas.sinConfirmar)}`) : ''}
+  ${card('Sin guía en Fixy', r.sinGuia, `${din(r.sinGuiaUSD)} · ${process.env.FIXY_REQUIERE_CONFIRMACION === 'si' ? 'confirmados que no se cargaron' : 'nunca se cargaron en Fixy'}${desplegable(r.listas.sinGuia)}`)}
   <div class="card"><div class="ct">No entregados</div><div class="cv">${r.noEntregados + r.devueltos + r.sinCobertura}</div>
     <div class="motivos">${Object.entries(r.motivos).sort((a, b) => b[1].n - a[1].n).map(([m, x]) =>
       `<details class="det dm"><summary><div class="mot"><span>${esc(m)}</span><b>${x.n}</b><em>${din(x.usd)}</em></div></summary>${filasLista(x.lista)}</details>`).join('') || '<div class="cx">Ninguno 🎉</div>'}</div></div>
