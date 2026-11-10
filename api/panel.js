@@ -318,7 +318,7 @@ ${metaError ? `<div class="aviso">⚠️ ${esc(metaError)}. Los datos de Meta se
 <div class="grid">
   ${stock.total === null
     ? card('Stock disponible', '—', `No se pudo consultar a Fixy${stock.error ? ': ' + esc(String(stock.error).slice(0, 120)) : ''}`)
-    : card('Stock disponible', `${stock.total.toLocaleString('es-PY')} frascos`, Object.entries(stock.porSku || {}).map(([k, v]) => `${esc(k)}: ${v}`).join(' · '), '', stock.dias !== null && stock.dias < 7 ? 'alerta' : '')}
+    : card('Stock disponible', `${stock.total.toLocaleString('es-PY')} frascos`, `${stock.reservado ? `+ ${stock.reservado} reservados para pedidos en curso · ` : ''}${Object.keys(stock.porSku || {}).map(esc).join(', ')}`, '', stock.dias !== null && stock.dias < 7 ? 'alerta' : '')}
   ${card('Venta promedio', `${stock.porDia ? stock.porDia.toFixed(1) : '0'} frascos/día`, 'Pedidos de los últimos 14 días')}
   ${card('Te alcanza para', stock.dias === null ? '—' : `<span class="${stock.dias < 7 ? 'neg' : stock.dias < 14 ? 'amar' : 'pos'}">${Math.floor(stock.dias)} días</span>`, stock.dias === null ? '' : stock.dias < 7 ? '⚠️ Reponé stock ya' : stock.dias < 14 ? 'Conviene ir preparando la reposición' : 'Stock tranquilo')}
 </div>
@@ -392,8 +392,10 @@ export async function GET(request) {
     const hace14 = sumarDias(hoy, -13);
     const unidades14 = todos.filter((p) => p.dia >= hace14 && p.grupo !== 'sin_cobertura').reduce((t, p) => t + p.unidades, 0);
     const porDia = unidades14 / 14;
-    const stockTotal = stockFixy && !stockFixy.error ? Object.values(stockFixy).reduce((a, b) => a + b, 0) : null;
-    const stock = { total: stockTotal, porSku: stockFixy?.error ? null : stockFixy, error: stockFixy?.error, porDia, dias: stockTotal !== null && porDia ? stockTotal / porDia : null };
+    const okStock = stockFixy && !stockFixy.error;
+    const stockTotal = okStock ? Object.values(stockFixy).reduce((a, b) => a + b.disponible, 0) : null;
+    const stockReservado = okStock ? Object.values(stockFixy).reduce((a, b) => a + b.reservado, 0) : 0;
+    const stock = { total: stockTotal, reservado: stockReservado, porSku: stockFixy?.error ? null : stockFixy, error: stockFixy?.error, porDia, dias: stockTotal !== null && porDia ? stockTotal / porDia : null };
     const aUSD = (v) => (meta.moneda === 'PYG' ? v / tasa : v);
 
     const dias = [];
