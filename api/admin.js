@@ -2,7 +2,7 @@ import { fixyPost } from '../lib/fixy.js';
 import { cargarLocalidades } from '../lib/cp.js';
 import { obtenerOrdenParaFixy } from '../lib/shopify.js';
 import { enviarOrdenAFixy } from '../lib/procesar.js';
-import { armarGuia } from '../lib/fixy.js';
+import { armarGuia, consultarStock } from '../lib/fixy.js';
 import { resolverCp } from '../lib/cp.js';
 
 // Abrir en el navegador:
@@ -45,6 +45,12 @@ export async function GET(request) {
         total_en_fixy: lista.length,
         encontrados: buscar ? lista.filter((x) => x.localidad.includes(buscar)).slice(0, 30) : lista.slice(0, 10),
       };
+    } else if (accion === 'stock') {
+      const skus = (process.env.FIXY_STOCK_SKUS || '1-MAG-700MG').split(',').map((x) => x.trim());
+      resultado = {
+        interpretado: await consultarStock(skus).catch((e) => `ERROR: ${e.message}`),
+        crudo: await fixyPost('consultarStock', { skus }).catch((e) => `ERROR: ${e.message}`),
+      };
     } else if (accion === 'novedades') {
       resultado = {
         sectores: await fixyPost('sectores').catch((e) => `ERROR: ${e.message}`),
@@ -64,7 +70,7 @@ export async function GET(request) {
       }
       resultado = await enviarOrdenAFixy(orden);
     } else {
-      return new Response('Acciones: test, servicios, registrar, localidades, ver, reenviar, novedades', { status: 400 });
+      return new Response('Acciones: test, servicios, registrar, localidades, ver, reenviar, novedades, stock', { status: 400 });
     }
 
     return Response.json({ ok: !resultado?.error, resultado });

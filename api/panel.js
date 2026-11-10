@@ -1,6 +1,7 @@
 import { shopifyGQL } from '../lib/shopify.js';
 import { traerMeta } from '../lib/meta.js';
 import { cotizacionUSD } from '../lib/cambio.js';
+import { consultarStock } from '../lib/fixy.js';
 
 // Panel UltraLabs: /api/panel?clave=TU_CLAVE&desde=2026-10-01&hasta=2026-10-28&moneda=PYG
 export const maxDuration = 30;
@@ -14,10 +15,22 @@ const COSTOS = {
   producto: n('COSTO_PRODUCTO_USD', 4),
   pack: n('COSTO_PACK_USD', 1.5),
   unidadesPorPack: n('UNIDADES_POR_PACK', 3),
-  envio: n('COSTO_ENVIO_USD', 5.63),
-  binancePct: n('COMISION_BINANCE_PCT', 2),
+  binancePct: n('COMISION_BINANCE_PCT', 0), // hoy sin costo; si vuelve a aplicar, cargar COMISION_BINANCE_PCT
+  comisionFixyPct: n('COMISION_FIXY_PCT', 1.5), // cobro contra reembolso, según la liquidación de Fixy
+  fleteDefectoGs: n('FLETE_GS_DEFECTO', 36500),
+  fleteSameDayExtraGs: n('FLETE_SAMEDAY_EXTRA_GS', 5000),
   efectividadSupuesta: n('EFECTIVIDAD_SUPUESTA_PCT', 50),
 };
+
+// Flete Standard por ciudad, en guaraníes (liquidación de Fixy de octubre). Same day suma un extra.
+const normC = (t = '') => t.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+const FLETES_GS = Object.fromEntries(Object.entries({
+  'Asuncion': 26500, 'Fernando de la Mora': 26500,
+  'Lambare': 31500, 'San Lorenzo': 31500, 'Luque': 31500, 'Mariano Roque Alonso': 31500, 'Nemby': 31500, 'Villa Elisa': 31500, 'San Antonio': 31500,
+  'Capiata': 36500, 'Aregua': 36500, 'Villeta': 36500, 'Itaugua': 36500, 'Itagua': 36500, 'Guarambare': 36500, 'Ypane': 36500, 'Ita': 36500,
+  ...(() => { try { return JSON.parse(process.env.FLETE_GS_POR_CIUDAD || '{}'); } catch { return {}; } })(),
+}).map(([c, v]) => [normC(c), Number(v)]));
+const fleteGs = (ciudad, sameDay) => (FLETES_GS[normC(ciudad)] ?? COSTOS.fleteDefectoGs) + (sameDay ? COSTOS.fleteSameDayExtraGs : 0);
 
 const diaPY = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: ZONA }).format(d ? new Date(d) : new Date());
 const sumarDias = (f, k) => new Date(Date.parse(`${f}T12:00:00Z`) + k * 86400000).toISOString().slice(0, 10);
@@ -72,13 +85,18 @@ function clasificar(o, tasa) {
   const ventaGs = Number(o.totalPriceSet.shopMoney.amount);
   const ventaUSD = ventaGs / tasa;
   const unidades = Math.max(1, (o.lineItems?.nodes || []).filter((l) => l.requiresShipping).reduce((s, l) => s + l.quantity, 0));
+  const envioUSD = fleteGs(o.shippingAddress?.city, tags.includes('fixy-servicio-smb')) / tasa;
+  const comisionUSD = ventaUSD * (COSTOS.comisionFixyPct / 100);
   const costos = {
     producto: unidades * COSTOS.producto,
     pack: Math.ceil(unidades / COSTOS.unidadesPorPack) * COSTOS.pack,
-    envio: COSTOS.envio,
+    envio: envioUSD,
+    comision: comisionUSD,
     binance: ventaUSD * (COSTOS.binancePct / 100),
   };
-  const costoUSD = costos.producto + costos.pack + costos.envio + costos.binance;
+  const costoUSD = costos.producto + costos.pack + costos.envio + costos.comision + costos.binance;
+  // Si vuelve, Fixy cobra igual el flete y la comisión (el producto vuelve al stock)
+  const costoDevolucionUSD = envioUSD + comisionUSD;
 
   const pago = (o.transactions || []).find((t) => t.status === 'SUCCESS' && ['SALE', 'CAPTURE'].includes(t.kind));
   return {
@@ -87,16 +105,16 @@ function clasificar(o, tasa) {
     guia: (tags.find((t) => t.startsWith('fixy-guia-')) || '').replace('fixy-guia-', ''),
     carga: new Intl.DateTimeFormat('es-PY', { timeZone: ZONA, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(o.createdAt)).replace(',', ''),
     nombre: o.name, cliente: o.shippingAddress?.name || '', ciudad: o.shippingAddress?.city || '',
-    dia: diaPY(o.createdAt), ventaUSD, contribUSD: ventaUSD - costoUSD, unidades, costos,
+    dia: diaPY(o.createdAt), ventaUSD, contribUSD: ventaUSD - costoUSD, unidades, costos, costoDevolucionUSD,
     grupo, sinSalir, salio: !['pendiente', 'sin_cobertura'].includes(grupo), motivo: motivoDe(grupo, estado, volvio), estado: estado.replace(/-/g, ' ') || 'sin estado',
   };
 }
 
 function caja(todos, desde, hasta) {
-  const c = { cobros: 0, cobradoUSD: 0, netoUSD: 0, unidades: 0, producto: 0, pack: 0, envio: 0, binance: 0 };
+  const c = { cobros: 0, cobradoUSD: 0, netoUSD: 0, unidades: 0, producto: 0, pack: 0, envio: 0, comision: 0, binance: 0 };
   for (const p of todos) if (p.diaCobro && p.diaCobro >= desde && p.diaCobro <= hasta) {
     c.cobros++; c.cobradoUSD += p.ventaUSD; c.netoUSD += p.contribUSD; c.unidades += p.unidades;
-    for (const k of ['producto', 'pack', 'envio', 'binance']) c[k] += p.costos[k];
+    for (const k of ['producto', 'pack', 'envio', 'comision', 'binance']) c[k] += p.costos[k];
   }
   return c;
 }
@@ -117,7 +135,7 @@ function motivoDe(grupo, estado, volvio) {
 }
 
 function calcular(pedidos, meta) {
-  const r = { pedidos: 0, motivos: {}, listas: { armado: [], deposito: [], sinGuia: [], sinConfirmar: [], calle: [] }, sinCobertura: 0, ventaUSD: 0, contribUSD: 0, salieron: 0, cobrados: 0, cobradoUSD: 0, contribCobradosUSD: 0,
+  const r = { pedidos: 0, motivos: {}, listas: { armado: [], deposito: [], sinGuia: [], sinConfirmar: [], calle: [] }, sinCobertura: 0, ventaUSD: 0, contribUSD: 0, salieron: 0, cobrados: 0, cobradoUSD: 0, contribCobradosUSD: 0, costoDevolucionesUSD: 0,
     enCalle: 0, enCalleUSD: 0, noEntregados: 0, noEntregadosUSD: 0, devueltos: 0, pendientes: 0, armado: 0, deposito: 0, sinGuia: 0, sinConfirmar: 0, armadoUSD: 0, depositoUSD: 0, sinGuiaUSD: 0, sinConfirmarUSD: 0, pendientesUSD: 0,
     gastoUSD: meta.gastoUSD, comprasMeta: meta.compras, valorMeta: meta.valor };
   for (const p of pedidos) {
@@ -129,7 +147,7 @@ function calcular(pedidos, meta) {
     if (p.grupo === 'cobrado') { r.cobrados++; r.cobradoUSD += p.ventaUSD; r.contribCobradosUSD += p.contribUSD; }
     if (p.grupo === 'en_reparto') { r.enCalle++; r.enCalleUSD += p.ventaUSD; r.listas.calle.push(p); }
     if (p.grupo === 'no_entregado') { r.noEntregados++; r.noEntregadosUSD += p.ventaUSD; }
-    if (p.grupo === 'devuelto') r.devueltos++;
+    if (p.grupo === 'devuelto') { r.devueltos++; r.costoDevolucionesUSD += p.costoDevolucionUSD; }
     if (p.grupo === 'pendiente') { r.pendientes++; r.pendientesUSD += p.ventaUSD; r[p.sinSalir]++; r[p.sinSalir + 'USD'] += p.ventaUSD; r.listas[p.sinSalir].push(p); }
   }
   const div = (a, b) => (b ? a / b : null);
@@ -142,7 +160,7 @@ function calcular(pedidos, meta) {
   r.ticket = div(r.ventaUSD, r.pedidos);
   r.efectividadReal = div(r.cobrados, r.salieron);
   r.profitSupuesto = r.contribUSD * (COSTOS.efectividadSupuesta / 100) - r.gastoUSD;
-  r.profitReal = r.contribCobradosUSD - r.gastoUSD;
+  r.profitReal = r.contribCobradosUSD - r.costoDevolucionesUSD - r.gastoUSD;
   return r;
 }
 
@@ -155,7 +173,7 @@ function sparkline(valores, color) {
 }
 
 function pagina(ctx) {
-  const { clave, desde, hasta, moneda, tasa, fuenteTasa, r, serie, pedidosLista, metaError, metaMoneda, tiempos = {}, totalPedidos = 0 } = ctx;
+  const { clave, desde, hasta, moneda, tasa, fuenteTasa, r, serie, pedidosLista, metaError, metaMoneda, tiempos = {}, totalPedidos = 0, stock = {} } = ctx;
   const din = (usd) => {
     if (usd === null || !Number.isFinite(usd)) return '—';
     return moneda === 'USD'
@@ -217,7 +235,7 @@ h2{font-size:15px;margin:26px 0 10px;display:flex;align-items:center;gap:8px}h2 
 .card{background:var(--card);padding:14px 16px 10px;position:relative;min-height:118px}.ct{color:var(--sub);font-size:12.5px}.cv{font-size:25px;font-weight:700;letter-spacing:-.3px;margin-top:2px}
 .cx{font-size:12px;color:var(--sub);margin-top:2px}.spark{width:100%;height:34px;display:block;margin-top:8px}
 .hero .cv{font-size:30px}.hero.oro{background:linear-gradient(160deg,#241c0b,#18181b 60%)}.hero.oro .cv{color:var(--oro)}
-.pos{color:var(--verde)!important}.neg{color:var(--rojo)!important}
+.pos{color:var(--verde)!important}.amar{color:var(--amar)!important}.card.alerta{background:linear-gradient(160deg,#2a1212,#18181b 60%)}.neg{color:var(--rojo)!important}
 .aviso{background:#2a1d0b;border:1px solid #5a4114;color:#f3d48a;border-radius:10px;padding:10px 14px;font-size:13px;margin-bottom:14px}
 .tabla{overflow-x:auto;border:1px solid var(--borde);border-radius:14px;background:var(--card)}
 table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px 12px;border-bottom:1px solid var(--borde);white-space:nowrap;text-align:left}th{color:var(--sub);font-weight:600;font-size:12px;background:var(--panel)}
@@ -251,7 +269,7 @@ ${metaError ? `<div class="aviso">⚠️ ${esc(metaError)}. Los datos de Meta se
   ${card(`Efectividad supuesta`, `${COSTOS.efectividadSupuesta}%`, 'Supuesto de planilla', '', 'hero')}
   ${card('Profit supuesto', `<span class="${signo(r.profitSupuesto)}">${din(r.profitSupuesto)}</span>`, `Con ${COSTOS.efectividadSupuesta}% de efectividad`, sparkline(serie.map((d) => d.profitSupuesto), '#e0b43c'), 'hero')}
   ${card('Efectividad real', pct(r.efectividadReal), `${r.cobrados} cobrados de ${r.salieron} que salieron`, sparkline(s('efectividadReal'), '#3ecf8e'), 'hero')}
-  ${card('Profit real', `<span class="${signo(r.profitReal)}">${din(r.profitReal)}</span>`, 'Cobrado − costos − Meta', sparkline(s('profitReal'), '#3ecf8e'), 'hero oro')}
+  ${card('Profit real', `<span class="${signo(r.profitReal)}">${din(r.profitReal)}</span>`, 'Cobrado − costos − devoluciones − Meta', sparkline(s('profitReal'), '#3ecf8e'), 'hero oro')}
 </div>
 
 <h2><span class="dot" style="background:#4f7cff"></span>Meta Ads</h2>
@@ -278,7 +296,8 @@ ${metaError ? `<div class="aviso">⚠️ ${esc(metaError)}. Los datos de Meta se
       <div class="mot"><span>Producto (${r.caja.unidades} frascos)</span><b></b><em>− ${din(r.caja.producto)}</em></div>
       <div class="mot"><span>Pack</span><b></b><em>− ${din(r.caja.pack)}</em></div>
       <div class="mot"><span>Envío Fixy (${r.caja.cobros})</span><b></b><em>− ${din(r.caja.envio)}</em></div>
-      <div class="mot"><span>Binance ${COSTOS.binancePct}%</span><b></b><em>− ${din(r.caja.binance)}</em></div>
+      <div class="mot"><span>Comisión Fixy ${COSTOS.comisionFixyPct}%</span><b></b><em>− ${din(r.caja.comision)}</em></div>
+      ${COSTOS.binancePct ? `<div class="mot"><span>Binance ${COSTOS.binancePct}%</span><b></b><em>− ${din(r.caja.binance)}</em></div>` : ''}
     </div></div>
   ${card('Cobrado de estos pedidos', din(r.cobradoUSD), `${r.cobrados} de los pedidos creados en el período · neto ${din(r.contribCobradosUSD)}`)}
   ${card('En la calle', din(r.enCalleUSD), `${r.enCalle} pedidos en reparto ahora mismo${desplegable(r.listas.calle, true)}`)}
@@ -295,6 +314,15 @@ ${metaError ? `<div class="aviso">⚠️ ${esc(metaError)}. Los datos de Meta se
       `<details class="det dm"><summary><div class="mot"><span>${esc(m)}</span><b>${x.n}</b><em>${din(x.usd)}</em></div></summary>${filasLista(x.lista)}</details>`).join('') || '<div class="cx">Ninguno 🎉</div>'}</div></div>
 </div>
 
+<h2><span class="dot" style="background:#a78bfa"></span>Stock en Fixy</h2>
+<div class="grid">
+  ${stock.total === null
+    ? card('Stock disponible', '—', `No se pudo consultar a Fixy${stock.error ? ': ' + esc(String(stock.error).slice(0, 120)) : ''}`)
+    : card('Stock disponible', `${stock.total.toLocaleString('es-PY')} frascos`, Object.entries(stock.porSku || {}).map(([k, v]) => `${esc(k)}: ${v}`).join(' · '), '', stock.dias !== null && stock.dias < 7 ? 'alerta' : '')}
+  ${card('Venta promedio', `${stock.porDia ? stock.porDia.toFixed(1) : '0'} frascos/día`, 'Pedidos de los últimos 14 días')}
+  ${card('Te alcanza para', stock.dias === null ? '—' : `<span class="${stock.dias < 7 ? 'neg' : stock.dias < 14 ? 'amar' : 'pos'}">${Math.floor(stock.dias)} días</span>`, stock.dias === null ? '' : stock.dias < 7 ? '⚠️ Reponé stock ya' : stock.dias < 14 ? 'Conviene ir preparando la reposición' : 'Stock tranquilo')}
+</div>
+
 <h2><span class="dot" style="background:var(--sub)"></span>Por día</h2>
 <div class="tabla"><table><thead><tr><th>Día</th><th>Pedidos</th><th>Facturación</th><th>Inversión</th><th>CPA real</th><th>Salieron</th><th>Cobrados</th><th>Efectividad</th><th>Profit real</th><th>Entró ese día</th></tr></thead>
 <tbody>${filasDias || '<tr><td colspan="10">Sin datos</td></tr>'}</tbody></table></div>
@@ -303,8 +331,8 @@ ${desde === hasta ? `<h2><span class="dot" style="background:var(--sub)"></span>
 <div class="tabla"><table><thead><tr><th>Pedido</th><th>Cliente</th><th>Ciudad</th><th>Estado</th><th>Unid.</th><th class="der">Monto</th></tr></thead>
 <tbody>${filasPedidos || '<tr><td colspan="6">Sin pedidos</td></tr>'}</tbody></table></div>` : ''}
 
-<p class="nota">Los pedidos se cuentan por el día en que se crearon, igual que el gasto de Meta, así cada día compara lo invertido con lo que generó. Profit supuesto = margen de todos los pedidos × ${COSTOS.efectividadSupuesta}% − inversión. Profit real = margen de los pedidos ya cobrados − inversión: en los días recientes sube a medida que Fixy entrega. Costos por pedido: producto $${COSTOS.producto} por frasco, pack $${COSTOS.pack} cada ${COSTOS.unidadesPorPack} frascos, envío $${COSTOS.envio}, Binance ${COSTOS.binancePct}% de la venta. Los no entregados y devueltos no suman costo. "Entró en el período" cuenta la plata de las entregas hechas entre esas fechas, sin importar cuándo se creó el pedido. Conversión con la cotización actual.</p>
-<p class="nota">Tiempos de carga: Shopify ${tiempos.shopify}s (${totalPedidos} pedidos) · Meta ${tiempos.meta}s · Cotización ${tiempos.cambio}s</p>
+<p class="nota">Los pedidos se cuentan por el día en que se crearon, igual que el gasto de Meta, así cada día compara lo invertido con lo que generó. Profit supuesto = margen de todos los pedidos × ${COSTOS.efectividadSupuesta}% − inversión. Profit real = margen de los pedidos ya cobrados − inversión: en los días recientes sube a medida que Fixy entrega. Costos por pedido: producto $${COSTOS.producto} por frasco, pack $${COSTOS.pack} cada ${COSTOS.unidadesPorPack} frascos, flete de Fixy según la ciudad (Gs. 26.500 a 36.500, +Gs. ${COSTOS.fleteSameDayExtraGs.toLocaleString('es-PY')} si es same day) y comisión de Fixy del ${COSTOS.comisionFixyPct}% sobre lo cobrado. Los devueltos suman su flete y comisión, porque Fixy los cobra igual. "Entró en el período" cuenta la plata de las entregas hechas entre esas fechas, sin importar cuándo se creó el pedido. Conversión con la cotización actual.</p>
+<p class="nota">Tiempos de carga: Shopify ${tiempos.shopify}s (${totalPedidos} pedidos) · Meta ${tiempos.meta}s · Cotización ${tiempos.cambio}s · Stock ${tiempos.stock}s</p>
 </div>
 <script>
 document.addEventListener('click', function (e) {
@@ -350,13 +378,22 @@ export async function GET(request) {
   try {
     const t0 = Date.now(), tiempos = {};
     const medir = (k, prom) => prom.finally(() => { tiempos[k] = ((Date.now() - t0) / 1000).toFixed(1); });
-    const [{ valor: tasa, fuente: fuenteTasa }, crudos, meta] = await Promise.all([
+    const SKUS = (process.env.FIXY_STOCK_SKUS || '1-MAG-700MG').split(',').map((x) => x.trim()).filter(Boolean);
+    const [{ valor: tasa, fuente: fuenteTasa }, crudos, meta, stockFixy] = await Promise.all([
       medir('cambio', cotizacionUSD()),
       medir('shopify', traerPedidos(sumarDias(desde, -Number(process.env.PANEL_DIAS_ATRAS || 25)), hasta)),
       medir('meta', traerMeta(desde, hasta)),
+      medir('stock', consultarStock(SKUS).catch((e) => ({ error: e.message }))),
     ]);
     const todos = crudos.map((o) => clasificar(o, tasa)).filter(Boolean);
     const pedidos = todos.filter((p) => p.dia >= desde && p.dia <= hasta);
+
+    // Stock: unidades en Fixy y para cuántos días alcanzan al ritmo de los últimos 14 días
+    const hace14 = sumarDias(hoy, -13);
+    const unidades14 = todos.filter((p) => p.dia >= hace14 && p.grupo !== 'sin_cobertura').reduce((t, p) => t + p.unidades, 0);
+    const porDia = unidades14 / 14;
+    const stockTotal = stockFixy && !stockFixy.error ? Object.values(stockFixy).reduce((a, b) => a + b, 0) : null;
+    const stock = { total: stockTotal, porSku: stockFixy?.error ? null : stockFixy, error: stockFixy?.error, porDia, dias: stockTotal !== null && porDia ? stockTotal / porDia : null };
     const aUSD = (v) => (meta.moneda === 'PYG' ? v / tasa : v);
 
     const dias = [];
@@ -374,7 +411,7 @@ export async function GET(request) {
     const serie = dias.map((f) => ({ dia: f, ...calcular(pedidos.filter((p) => p.dia === f), metaDe([f])), caja: caja(todos, f, f) }));
     const pedidosLista = desde === hasta ? pedidos : [];
 
-    return new Response(pagina({ clave, desde, hasta, moneda, tasa, fuenteTasa, r, serie, pedidosLista, metaError: meta.error, metaMoneda: meta.moneda, tiempos, totalPedidos: crudos.length }), {
+    return new Response(pagina({ clave, desde, hasta, moneda, tasa, fuenteTasa, r, serie, pedidosLista, metaError: meta.error, metaMoneda: meta.moneda, tiempos, totalPedidos: crudos.length, stock }), {
       // Vercel guarda la página 2 minutos: las siguientes aperturas son instantáneas
       headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'public, s-maxage=120, stale-while-revalidate=600' },
     });
