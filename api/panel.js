@@ -161,6 +161,9 @@ function calcular(pedidos, meta) {
   r.efectividadReal = div(r.cobrados, r.salieron);
   r.profitSupuesto = r.contribUSD * (COSTOS.efectividadSupuesta / 100) - r.gastoUSD;
   r.profitReal = r.contribCobradosUSD - r.costoDevolucionesUSD - r.gastoUSD;
+  // Margen: profit sobre lo cobrado (real) o sobre lo que se cobraría con la efectividad supuesta
+  r.margenReal = div(r.profitReal, r.cobradoUSD);
+  r.margenSupuesto = div(r.profitSupuesto, r.ventaUSD * (COSTOS.efectividadSupuesta / 100));
   return r;
 }
 
@@ -201,6 +204,7 @@ function pagina(ctx) {
   const desplegable = (lista, conEstado) => (lista.length ? `<details class="det"><summary>Ver pedidos</summary>${filasLista(lista, conEstado)}</details>` : '');
   const card = (titulo, valor, extra = '', spark = '', clase = '') =>
     `<div class="card ${clase}"><div class="ct">${titulo}</div><div class="cv">${valor}</div>${extra ? `<div class="cx">${extra}</div>` : ''}${spark}</div>`;
+  const margen = (m) => (m === null || !Number.isFinite(m) ? '' : `<span class="pctm ${m >= 0 ? 'pos' : 'neg'}">${(m * 100).toFixed(1)}%</span>`);
   const signo = (v) => (v === null ? '' : v >= 0 ? 'pos' : 'neg');
 
   const filasDias = serie.map((d) => `<tr><td>${d.dia.slice(8)}/${d.dia.slice(5, 7)}</td><td>${d.pedidos}</td><td>${din(d.ventaUSD)}</td>
@@ -235,7 +239,7 @@ h2{font-size:15px;margin:26px 0 10px;display:flex;align-items:center;gap:8px}h2 
 .card{background:var(--card);padding:14px 16px 10px;position:relative;min-height:118px}.ct{color:var(--sub);font-size:12.5px}.cv{font-size:25px;font-weight:700;letter-spacing:-.3px;margin-top:2px}
 .cx{font-size:12px;color:var(--sub);margin-top:2px}.spark{width:100%;height:34px;display:block;margin-top:8px}
 .hero .cv{font-size:30px}.hero.oro{background:linear-gradient(160deg,#241c0b,#18181b 60%)}.hero.oro .cv{color:var(--oro)}
-.pos{color:var(--verde)!important}.amar{color:var(--amar)!important}.card.alerta{background:linear-gradient(160deg,#2a1212,#18181b 60%)}.neg{color:var(--rojo)!important}
+.pos{color:var(--verde)!important}.amar{color:var(--amar)!important}.pctm{font-size:.5em;font-weight:600;margin-left:10px;padding:3px 8px;border-radius:99px;background:rgba(62,207,142,.12);vertical-align:middle}.pctm.neg{background:rgba(248,113,113,.12)}.card.alerta{background:linear-gradient(160deg,#2a1212,#18181b 60%)}.neg{color:var(--rojo)!important}
 .aviso{background:#2a1d0b;border:1px solid #5a4114;color:#f3d48a;border-radius:10px;padding:10px 14px;font-size:13px;margin-bottom:14px}
 .tabla{overflow-x:auto;border:1px solid var(--borde);border-radius:14px;background:var(--card)}
 table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px 12px;border-bottom:1px solid var(--borde);white-space:nowrap;text-align:left}th{color:var(--sub);font-weight:600;font-size:12px;background:var(--panel)}
@@ -267,9 +271,9 @@ ${metaError ? `<div class="aviso">⚠️ ${esc(metaError)}. Los datos de Meta se
 <h2><span class="dot" style="background:var(--oro)"></span>Resultado</h2>
 <div class="grid">
   ${card(`Efectividad supuesta`, `${COSTOS.efectividadSupuesta}%`, 'Supuesto de planilla', '', 'hero')}
-  ${card('Profit supuesto', `<span class="${signo(r.profitSupuesto)}">${din(r.profitSupuesto)}</span>`, `Con ${COSTOS.efectividadSupuesta}% de efectividad`, sparkline(serie.map((d) => d.profitSupuesto), '#e0b43c'), 'hero')}
+  ${card('Profit supuesto', `<span class="${signo(r.profitSupuesto)}">${din(r.profitSupuesto)}</span>${margen(r.margenSupuesto)}`, `Con ${COSTOS.efectividadSupuesta}% de efectividad · margen sobre lo que se cobraría`, sparkline(serie.map((d) => d.profitSupuesto), '#e0b43c'), 'hero')}
   ${card('Efectividad real', pct(r.efectividadReal), `${r.cobrados} cobrados de ${r.salieron} que salieron`, sparkline(s('efectividadReal'), '#3ecf8e'), 'hero')}
-  ${card('Profit real', `<span class="${signo(r.profitReal)}">${din(r.profitReal)}</span>`, 'Cobrado − costos − devoluciones − Meta', sparkline(s('profitReal'), '#3ecf8e'), 'hero oro')}
+  ${card('Profit real', `<span class="${signo(r.profitReal)}">${din(r.profitReal)}</span>${margen(r.margenReal)}`, 'Cobrado − costos − devoluciones − Meta · margen sobre lo cobrado', sparkline(s('profitReal'), '#3ecf8e'), 'hero oro')}
 </div>
 
 <h2><span class="dot" style="background:#4f7cff"></span>Meta Ads</h2>
